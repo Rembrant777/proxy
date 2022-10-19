@@ -15,7 +15,7 @@ docker run -itd  --name myubuntuaimer20221018  -v /Users/apple/YR/homework/my-pr
 4> in the above folder we set mapping from our own host to docker namespace so that you can compile your c codes with ubuntu's inner installed gcc/g++ compiler 
 
 5> ok here comes to how to compile the project before compile your c codes into binary executable file you need to install 
-> 5.1 gcc on your docker container of ubuntu by apt-get install gcc 
-> 5.2 apt-get install make 
-> 5.3 then you execute the compile command ./build.sh to compile the c codes under proxy and go to the tiny foler also execute the ./build.sh script to compile the tiny server c codes 
-
+* 5.1 gcc on your docker container of ubuntu by apt-get install gcc 
+* 5.2 apt-get install make 
+* 5.3 then you execute the compile command ./build.sh to compile the c codes under proxy and go to the tiny foler also execute the ./build.sh script to compile the tiny server c codes 
+* 5.4 then run the test cases to test proxy normal function, proxy works in parallel, proxy provides lru and lfu policies  
