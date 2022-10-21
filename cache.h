@@ -6,7 +6,7 @@
 #include "csapp.h"
 
 #define KEY_SIZE 64
-#define VALUE_SIZE 128
+#define VALUE_SIZE 102400
 
 // cache entry struct
 typedef struct CacheItem {

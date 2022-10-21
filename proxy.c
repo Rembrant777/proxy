@@ -128,6 +128,27 @@ char *get(char *key);
 int set(char *key, char *value);
 // ----- cache api ------
 
+// ---- test cases of caches ----
+// method to execute all the lru cache related cases
+// return 0 means all cases passed
+// return n and n >0 means n test cases passed, n < total cases cnt
+// return -1 means server internal error
+int test_lru_cache();
+
+// method to execute all the lfu cache related cases
+// return 0 means all cases passed
+// return n and n >0 means n test cases passed, n < total cases cnt
+// return -1 means server internal error
+int test_lfu_cache();
+
+// method to test proxy's inner cache api {get, set, exist}
+// return ans = 0 means all test cases passed
+// return n and n > 0 mean n tests cases passed, n < total cases cnt
+// return -1 means server internal error
+// return -2 means no available cache
+int test_cache();
+// ---- test cases of caches ----
+
 
 static const char *accept_hdr = "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n";
 static const char *accept_encoding_hdr = "Accept-Encoding: gzip, deflate\r\n";
@@ -137,7 +158,7 @@ static const char *user_agent_hdr = "User-Agent: Mozilla/5.0 (Macintosh; Intel M
 
 #define THREAD_POOL_SIZE 3
 #define SHARED_BUFSIZE 16
-#define    MAXLINE     1024
+#define    MAXLINE     4096000
 
 // =====
 sem_t w;
@@ -159,23 +180,42 @@ int main(int argc, char **argv) {
     sockaddr_in client_addr;
     pthread_t tid;
 
+    if (argc == 2 && strcmp(argv[1], "test") == 0) {
+        fprintf(stderr, "#main test open file\n");
+        char *path = "/opt/proxy_cache/home.html";
+        FILE *fp;
+        fp = fopen(path, "w+");
+        fclose(fp);
+        int proxy_fd = open(path, O_RDWR, O_CREAT);
+        fprintf(stderr, "#main test proxy_fd %d\n", proxy_fd);
+        return 0;
+    }
+
     if (argc < 2) {
         fprintf(stderr, "usage: %s <port> <cache policy>", argv[0]);
         exit(1);
     }
 
     if (argc == 2 && strcmp(argv[1], "lru_test") == 0) {
-        fprintf(stderr, "#main recv lru test will execute lru cache test!");
-
+        fprintf(stderr, "#main recv lru test will execute lru cache test!\n");
+        int ans = test_lru_cache();
+        fprintf(stderr, "#main test_lru_cache ans ==> %d\n", ans);
         // after execute all test cases exit directly
         return 0;
     }
 
     if (argc == 2 && strcmp(argv[1], "lfu_test") == 0) {
-        fprintf(stderr, "#main recv lfu test will execute lfu cache test!");
-
-
+        fprintf(stderr, "#main recv lfu test will execute lfu cache test!\n");
+        int ans = test_lfu_cache();
+        fprintf(stderr, "#main test_lru_cache ans ==> %d\n", ans);
         // after execute all test cases exit directly
+        return 0;
+    }
+
+    if (argc == 2 && strcmp(argv[1], "cache_test") == 0) {
+        fprintf(stderr, "#main recv cache test cases\n");
+        int ans = test_cache();
+        fprintf(stderr, "#main test_cache ans ==> %d\n", ans);
         return 0;
     }
 
@@ -185,7 +225,7 @@ int main(int argc, char **argv) {
 
     // we set lru is default policy
     if (argc == 3 && strcmp(argv[2], "lfu") == 0) {
-        int ans = createLFUCache(1049000, lfuCache);
+        int ans = createLFUCache(1049000, &lfuCache);
         fprintf(stderr, "create lfu cache ret  %d pointer %p\n", ans, lfuCache);
     }
 
@@ -209,6 +249,7 @@ int main(int argc, char **argv) {
     for (int i = 0; i < THREAD_POOL_SIZE; i++) {
         fprintf(stdout, "Pthread_create with index %d\n", i);
         Pthread_create(&tid, NULL, runnable, &client_addr);
+        fprintf(stderr, "Pthread_create thread tid %ld\n", tid);
     }
 
     while (1) {
@@ -269,7 +310,7 @@ void *runnable(void *vargp) {
 
     while (1) {
         int fd = sbuf_remove(&sbuffer);
-        fprintf(stdout, "receive connect fd %d from client\n", fd);
+        fprintf(stdout, "proxy#runnable thread id %ld receive connect fd %d from client\n", pthread_self(), fd);
         if ((result = request_processor(fd, &request)) == -1) {
             bad_request_handler(fd);
             free_request(request);
@@ -388,7 +429,6 @@ void forward_request(int fd, request_t request) {
     size_t n, total_read;
     char *name, *port_str, http[1024], buf[MAXLINE], cachebuf[MAX_OBJECT_SIZE];
     rio_t rio;
-
     cachebuf[0] = '\0';
     name = strtok(request.domain, ":");
     port_str = strtok(NULL, ":");
@@ -408,17 +448,14 @@ void forward_request(int fd, request_t request) {
     // we set the cache_value = request#path's proxy local file path
     char *cache_value = NULL;
     P(&w);
-    if (exists(cache_key) == 0) {
+    if (get(cache_key) != NULL) {
         fprintf(stderr, "#forward_request cache key %s already exists in cache get from cache directly\n",
                 cache_key);
         cache_value = get(cache_key);
         V(&w);
-        int len = strlen(cache_value);
-        fprintf(stderr, "#forward_request cache key %s value len %d\n", cache_key, len);
-
-        // read data from cache directly no remote connection needs to be established
-        // read from cache_value's given file path
-
+        // this means cache hit request key, we set server = -2 so that
+        // we directly send data from cache_value -> fd -> client instead of create connection between client & server
+        server = -2;
     } else {
         V(&w);
         // proxy's cache cannot locate value by given key read value via connection to server(name:port_str)
@@ -438,24 +475,42 @@ void forward_request(int fd, request_t request) {
             fprintf(stderr, "#forward_request cannot connect to remote server: (%s:%d)!\n", name, atoi(port_str));
             return;
         }
+    }
 
-        fprintf(stderr, "#forward_request begin read via server fd %d", server);
-
+    fprintf(stderr, "#forward_request begin read via server fd %d\n", server);
+    // read data from server(file descriptor) to rio cache space
+    if (server != -2) {
+        fprintf(stderr, "#foward_request no cache data find read data via server by server fd %d\n", server);
         Rio_readinitb(&rio, server);
+        char *cur_dir = getcwd(NULL, 0);
+        cur_dir = strcat(cur_dir, "/proxy_cache/");
         total_read = 0;
         while ((n = Rio_readlineb(&rio, buf, MAXLINE)) > 0) {
-            fprintf(stderr, "#forward_request read data from buf n %d", n);
+            fprintf(stderr, "#forward_request read data from buf n %d fd %d\n", n, server);
             if (total_read + n <= MAX_OBJECT_SIZE) {
                 strcat(cachebuf, buf);
             }
             total_read += n;
+            // before we write data via fd to client stream
+            // we also write the buf data to the
             Rio_writen(fd, buf, n);
         }
-
-        fprintf(stderr, "#forward_request free request entity here");
+        // here we cache accumulated webobject from cachebuf -> cache
+        int cache_ret = set(request.path, cachebuf);
+        fprintf(stderr, "#forward_request here we sync data from cachebuf to cache sync result %d\n", cache_ret);
+    } else if (server == -2){
+        fprintf(stderr, "#forward_request match cache value read from proxy local cache to client side \n");
+        // get operation's underlying implement will automatically update the frequency or the lru parameter so the location of the item will be updated
+        char *cache_value = get(request.path);
+        int len = strlen(cache_value);
+        Rio_writen(fd, cache_value, MAX_OBJECT_SIZE);
+        fprintf(stderr, "#forward_request read from cache len %d \ncontent \n%s\n", len, cache_value);
     }
+
+    fprintf(stderr, "#forward_request free request entity here");
     free_request(request);
 }
+
 
 void reparse(request_t *request) {
     char *save, *path;
@@ -473,6 +528,7 @@ void show_request(request_t *request) {
 }
 
 
+// @deprecated
 int exists(char *key) {
     int ans = -1;
     char *value = NULL;
@@ -499,28 +555,158 @@ char *get(char *key) {
     char *ans = NULL;
     if (lruCache != NULL) {
         fprintf(stderr, "#get get data from lru cache(len=%d) \n", lruCache->_len);
-        ans = getFromLRUCache(cache, key);
+        ans = getFromLRUCache(lruCache, key);
     } else if (lfuCache != NULL) {
         fprintf(stderr, "#get get data from lfu cache(len=%d) \n", lfuCache->_len);
+        ans = getFromLFUCache(lfuCache, key);
     } else {
         ans = NULL;
     }
-    fprintf("#get return ans != NULL status %b \n", (ans != NULL));
     return ans;
 }
 
 int set(char *key, char *value) {
     int ans = 0;
     int len = strlen(value);
-    fprintf(stderr, "#set key content %s value len %d\n", key, len);
+    if (len > 0) {
+        fprintf(stderr, "#set key content %s value value %d\n", key, value);
+    }
     if (lruCache != NULL) {
-        fprintf(stderr, "#set data to lru with key %s value len %d\n", key, len);
+        fprintf(stderr, "#set data to lru with key %s value %s\n", key, value);
         ans = setToLRUCache(lruCache, key, value);
+        printLRUCache(lruCache);
     } else if (lfuCache != NULL) {
         fprintf(stderr, "#set data to lfu with key %s value len %d\n", key, len);
         ans = setToLFUCache(lfuCache, key, value);
     } else {
         ans = -2;
     }
+    return ans;
+}
+
+/// --- test cases
+int test_lru_cache() {
+    int ans = 0;
+    int capacity = 3;
+    int ret = createLRUCache(capacity, &lruCache);
+    fprintf(stderr, "#test_lru_cache create cache ret %d\n", ret);
+
+    // append data to cache
+    ret = setToLRUCache(lruCache, "key1", "value1");
+    ans += ret;
+    fprintf(stderr, "#setToLRUCache ret %d\n", ret);
+    ret = setToLRUCache(lruCache, "key2", "value2");
+    ans += ret;
+    fprintf(stderr, "#setToLRUCache ret %d\n", ret);
+    ret = setToLRUCache(lruCache, "key3", "value3");
+    ans += ret;
+    fprintf(stderr, "#setToLRUCache ret %d\n", ret);
+    ret = setToLRUCache(lruCache, "key4", "value4");
+    ans += ret;
+    fprintf(stderr, "#setToLRUCache ret %d\n", ret);
+    ret = setToLRUCache(lruCache, "key5", "value5");
+    ans += ret;
+    fprintf(stderr, "#setToLRUCache ret %d\n", ret);
+    ret = setToLRUCache(lruCache, "key6", "value6");
+    ans += ret;
+    fprintf(stderr, "#setToLRUCache ret %d\n", ret);
+    // key6 key5 key4 | key3,2,1 removed
+
+    // get data from cache
+    // NULL
+    char *value = getFromLRUCache(lruCache, "key1");
+    fprintf(stderr, "#getFromLRUCache key %s, value %s\n", "key1", value);
+
+    // NULL
+    value = getFromLRUCache(lruCache, "key2");
+    fprintf(stderr, "#getFromLRUCache key %s, value %s\n", "key2", value);
+
+    // NULL
+    value = getFromLRUCache(lruCache, "key3");
+    fprintf(stderr, "#getFromLRUCache key %s, value %s\n", "key3", value);
+
+    // value4
+    value = getFromLRUCache(lruCache, "key4");
+    fprintf(stderr, "#getFromLRUCache key %s, value %s\n", "key4", value);
+
+    // value5
+    value = getFromLRUCache(lruCache, "key5");
+    fprintf(stderr, "#getFromLRUCache key %s, value %s\n", "key5", value);
+
+    // value6
+    value = getFromLRUCache(lruCache, "key6");
+    fprintf(stderr, "#getFromLRUCache key %s, value %s\n", "key6", value);
+
+    // NULL
+    value = getFromLRUCache(lruCache, "key7");
+    fprintf(stderr, "#getFromLRUCache key %s, value %s\n", "key7", value);
+
+    // show
+    printLRUCache(lruCache);
+    ret = destroyLRUCache(lruCache);
+    ans += ret;
+    fprintf(stderr, "#destroyLRUCache ret %d\n", ret);
+
+    return ans;
+}
+/// --- test cases
+
+int test_lfu_cache() {
+    int ans = 0;
+    int capacity = 3;
+    int ret = createLFUCache(capacity, &lfuCache);
+    fprintf(stderr, "#test_lfu_cache create cache ret %d\n", ret);
+
+    // append data to cache
+    ret = setToLFUCache(lfuCache, "key1", "value1");
+    ans += ret;
+    fprintf(stderr, "#setToLFUCache ret %d\n", ret);
+
+    ret = setToLFUCache(lfuCache, "key2", "value2");
+    ans += ret;
+    fprintf(stderr, "#setToLFUCache ret %d\n", ret);;
+
+    ret = setToLFUCache(lfuCache, "key3", "value3");
+    ans += ret;
+    fprintf(stderr, "#setToLFUCache ret %d\n", ret);;
+
+    // get value by given key = key1
+    ret = setToLFUCache(lfuCache, "key4", "value4");
+    ans += ret;
+    fprintf(stderr, "#setToLFUCache ret %d\n", ret);;
+
+    ret = setToLFUCache(lfuCache, "key5", "value5");
+    ans += ret;
+    fprintf(stderr, "#setToLFUCache ret %d\n", ret);;
+
+    ret = setToLFUCache(lfuCache, "key6", "value6");
+    ans += ret;
+    fprintf(stderr, "#setToLFUCache ret %d\n", ret);;
+
+    ret = setToLFUCache(lfuCache, "key7", "value7");
+    ans += ret;
+    fprintf(stderr, "#setToLFUCache ret %d\n", ret);
+
+    printLFUCache(lfuCache);
+    ret = destroyLFUCache(lfuCache);
+    fprintf(stderr, "#destroyLFUCache ret %d\n", ret);
+    ans += ret;
+    return ans;
+}
+
+int test_cache() {
+    int ans = 0;
+    // init lru we test cache get/set/exists based on lru cache
+    int capacity = 6;
+    int ret = createLRUCache(capacity, &lruCache);
+    char *key = "key1";
+    char *value = get(key);
+    fprintf(stderr, "#test_cache get value %s by given key = %s from cache\n", value, key);
+
+    value = "a.txt";
+    ret = set(key, value);
+    fprintf(stderr, "#test_case set (k,v) (%s:%s) to cache \n", key, value);
+    value = get(key);
+    fprintf(stderr, "#test_case get(key=%s)=> value=%s from cache\n", key, value);
     return ans;
 }
