@@ -10,7 +10,7 @@
 apt-get install gcc
 apt-get install make 
 ```
-* when you pull your docker ubuntu image from remote repo(docker.hub) successfully, then you execute the script to make a mapping from your development directory to ubuntu os's `/opt` directory.
+* when you pull your docker ubuntu image from remote repo(docker.hub) successfully, then you execute the script [ubuntu-proxy.sh](https://github.com/nanachi1027/proxy/blob/main/ubuntu-proxy.sh) to make a mapping from your development directory to ubuntu os's `/opt` directory.
 
 * when your successfully setup the docker image use command below to login the docker env go `/opt`
 ```
